@@ -3,7 +3,11 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
-from numpy import character
+# ========== 모델 정의 ==========
+@dataclass
+class Relationship:
+    friend: List[str]
+    enemy: List[str]
 
 @dataclass
 class Character:
@@ -11,172 +15,108 @@ class Character:
     slug: str
     subtitle: str
     story: str
+    region: str = ""
     affinity: int = 0
-    is_ally: bool = False
+    isAlly: bool = False
+    relationships: Dict[str, Relationship] = None
 
 @dataclass
 class Region:
     name: str
     characters: List[Character]
 
+# ========== 게임 상태 ==========
 class GameState:
     def __init__(self, regions: List[Region]):
         self.regions = regions
-        self.region_index = -1
-        self.current_region: Optional[Region] = None
-        self.current_character: Optional[Character] = None
-        self.chosen: List[Character] = []
-        self.conv_counts: Dict[str, int] = {}
-        self.region_conv_counts = 0
+        self.convCounts: Dict[str, int] = {}
+        self.currentCharacter: Optional[Character] = None
+        self.convLimit = 7
         self.allies: List[Character] = []
-        self.current_round = 1
-        self.max_rounds = 80
-        self.conv_limit = 7
-        self.affinity_threshold = 20
-        self.ally_threshold = 11
+        self.maxRounds = 1
+        self.currentRound = 1
+        self.affinityThreshold = 5
+        self.allyThreshold = 2
+        self.relationshipThreshold = 2
+        self.totalRelationship = 5
 
     @classmethod
-    def load_from_file(cls, path: str) -> 'GameState':
-        with open(path, encoding='utf-8') as f:
+    def loadFromFile(cls, path1: str, path2: str) -> 'GameState':
+        with open(path1, encoding='utf-8') as f:
             data = json.load(f)
+        with open(path2, encoding='utf-8') as ext_f:
+            extData = json.load(ext_f)
+        relations = {name: Relationship(info['friends'], info['enemies']) for name, info in extData.items()}
         regions = [Region(name, [Character(**c) for c in chars]) for name, chars in data.items()]
+        for region in regions:
+            for char in region.characters:
+                char.region = region.name
+                if char.name in relations:
+                    char.relationships = relations[char.name]
+                else:
+                    char.relationships = Relationship(friend=[], enemy=[])
         return cls(regions)
 
-    def next_region(self) -> bool:
-        self.region_index += 1
-        if self.region_index >= len(self.regions):
-            self.current_region = None
-            return False
-        self.current_region = self.regions[self.region_index]
-        self.chosen = random.sample(self.current_region.characters, 2)
-        self.conv_counts = {c.slug: 0 for c in self.chosen}
-        self.region_conv_counts = 0
-        self.current_character = self.chosen[0]
-        return True
+    def initialize(self):
+        random.shuffle(self.regions)
+        self.convCounts = {}
+        self.currentRound = 1
+        self.allies = []
+        self.totalRelationship = 15
+        self.currentCharacter = self.selectNextCharacter()
 
-    def talk(self, slug: str, affinity_change: int = 0) -> None:
-        if not self.current_region or slug not in self.conv_counts:
+
+    def getRegionName(self, slug: str) -> Optional[str]:
+        for region in self.regions:
+            for char in region.characters:
+                if char.slug == slug:
+                    return region.name
+        return None
+
+    def isConversationDone(self, slug: str) -> bool:
+        char = next((c for region in self.regions for c in region.characters if c.slug == slug), None)
+        return not char or self.convCounts.get(slug, 0) >= self.convLimit or char.isAlly
+
+    def selectNextCharacter(self) -> Optional[Character]:
+        candidates = [
+            c for region in self.regions for c in region.characters
+            if self.convCounts.get(c.slug, 0) < self.convLimit and not c.isAlly
+        ]
+        if not candidates:
+            self.currentCharacter = None
+            return None
+        self.currentCharacter = random.choice(candidates)
+        return self.currentCharacter
+
+    def talk(self, slug: str, name: str, affinityChange: int = 0):
+        char = next((c for region in self.regions for c in region.characters if c.slug == slug), None)
+        if not char or self.convCounts.get(slug, 0) >= self.convLimit:
             return
-        if self.conv_counts[slug] >= self.conv_limit:
-            return
-        self.conv_counts[slug] += 1
-        if self.conv_counts[slug] >= self.conv_limit:
-            self.region_conv_counts += 1
-        char = next(c for c in self.chosen if c.slug == slug)
-        char.affinity += affinity_change
-        if char.affinity >= self.affinity_threshold and not char.is_ally:
-            char.is_ally = True
+        self.convCounts[slug] = self.convCounts.get(slug, 0) + 1
+        char.affinity += affinityChange
+        if char.affinity >= self.affinityThreshold and not char.isAlly:
+            char.isAlly = True
             self.allies.append(char)
-        self.current_round += 1
+            print(f"[DEBUG] talk() - 대상 캐릭터: {name}, affinityChange={affinityChange}")
+            print(f"[DEBUG] allies 수: {len(self.allies)}")
+            # 새 동료(char)와 기존 동료(ally)간 관계 계산
+            for ally in self.allies:
+                if ally is char:
+                    continue  # 자기 자신은 제외
 
-    def is_region_complete(self) -> bool:
-        return self.region_conv_counts >= 2
+                # char → ally
+                if ally.name in char.relationships.enemy:
+                    self.totalRelationship -= 1
+                if ally.name in char.relationships.friend:
+                    self.totalRelationship += 1
 
-    def is_game_over(self) -> bool:
-        return self.current_round > self.max_rounds or self.current_region is None
+                # ally → char
+                if char.name in ally.relationships.enemy:
+                    self.totalRelationship -= 1
+                if char.name in ally.relationships.friend:
+                    self.totalRelationship += 1
 
-    def result(self) -> str:
-        return 'Game Clear' if len(self.allies) >= self.ally_threshold else 'Game Over'
+        self.currentRound += 1
 
-
-# class Character:
-#     def __init__(self, name: str, slug: str, subtitle: str, story: str):
-#         self.name = name
-#         self.slug = slug
-#         self.subtitle = subtitle
-#         self.story = story
-#         self.affinity = 0       # 현재 호감도
-#         self.is_ally = False    # 동료 여부
-
-#     def __repr__(self):
-#         return f"<Character {self.name} (affinity={self.affinity}, ally={self.is_ally})>"
-
-# class Region:
-#     def __init__(self, name: str, characters: List[Character]):
-#         self.name = name
-#         self.characters = characters
-
-#     def __repr__(self):
-#         return f"<Region {self.name}: {len(self.characters)} characters>"
-
-# class GameState:
-#     def __init__(self, regions: List[Region]):
-#         self.regions = regions
-#         self.region_index = -1
-#         self.current_region: Optional[Region] = None
-#         self.chosen: List[Character] = []         # 현재 지역에서 만날 캐릭터들
-#         self.conv_counts: Dict[str, int] = {}     # slug -> 대화 횟수
-#         self.allies: List[Character] = []          # 동료 목록
-#         self.current_round = 1
-#         self.max_rounds = 80                       # 최대 라운드
-#         self.conv_limit = 7                        # 캐릭터당 최대 대화 횟수
-#         self.affinity_threshold = 20               # 동료 전환 호감도
-#         self.ally_threshold = 11                   # 클리어 조건 동료 수
-
-#     @classmethod
-#     def load_from_file(cls, path: str) -> "GameState":
-#         with open(path, "r", encoding="utf-8") as f:
-#             raw = json.load(f)
-#         regions = [Region(name, [Character(**c) for c in chars]) for name, chars in raw.items()]
-#         return cls(regions)
-
-#     def next_region(self) -> bool:
-#         """다음 지역으로 이동하고, 랜덤 캐릭터 2명 선택"""
-#         self.region_index += 1
-#         if self.region_index >= len(self.regions):
-#             self.current_region = None
-#             return False
-#         self.current_region = self.regions[self.region_index]
-#         # 캐릭터 2명 랜덤 선택
-#         self.chosen = random.sample(self.current_region.characters, 2)
-#         # 대화 횟수 초기화
-#         for c in self.chosen:
-#             self.conv_counts[c.slug] = 0
-#         return True
-
-#     def talk(self, slug: str, affinity_change: int = 0) -> Optional[Character]:
-#         """
-#         캐릭터와 대화 진행: 대화 횟수+, 호감도 변화, 라운드 진행.
-#         conv_limit 초과 시 대화 불가.
-#         호감도 threshold 달성 시 동료 추가.
-#         """
-#         if not self.current_region:
-#             return None
-#         # 선택된 캐릭터 중 확인
-#         char = next((c for c in self.chosen if c.slug == slug), None)
-#         if not char:
-#             return None
-#         count = self.conv_counts.get(slug, 0)
-#         if count >= self.conv_limit:
-#             return char
-#         # 대화 횟수 및 호감도
-#         self.conv_counts[slug] = count + 1
-#         char.affinity += affinity_change
-#         # 동료 전환
-#         if char.affinity >= self.affinity_threshold and not char.is_ally:
-#             char.is_ally = True
-#             self.allies.append(char)
-#         # 라운드 증가
-#         self.current_round += 1
-#         return char
-
-#     def is_region_complete(self) -> bool:
-#         """현재 지역의 두 캐릭터와 모두 conv_limit회 대화했는지"""
-#         return all(self.conv_counts.get(c.slug, 0) >= self.conv_limit for c in self.chosen)
-
-#     def is_game_over(self) -> bool:
-#         """라운드 초과 or 모든 지역 탐색 완료"""
-#         return self.current_round > self.max_rounds or self.region_index >= len(self.regions)
-
-#     def result(self) -> str:
-#         """게임 결과 반환: 동료 수로 클리어/패배"""
-#         if len(self.allies) >= self.ally_threshold:
-#             return "Game Clear"
-#         return "Game Over"
-
-#     def __repr__(self):
-#         region = self.current_region.name if self.current_region else "None"
-#         return (
-#             f"<GameState round {self.current_round}/{self.max_rounds}, "
-#             f"region={region}, allies={len(self.allies)}>"
-#         )
+    def isGameOver(self) -> bool:
+        return self.currentRound > self.maxRounds or self.currentCharacter is None
